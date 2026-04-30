@@ -1,0 +1,49 @@
+# 1. 创建 ServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kafka-sse-sa
+  namespace: default
+---
+# 2. 创建 Role，定义对 ConfigMap 的操作权限
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kafka-sse-role
+  namespace: default
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["kafka-sse-partition-lock"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create", "list", "get"] # 用于初始创建和列表查看
+---
+# 3. 将 Role 绑定到 ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kafka-sse-rolebinding
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: kafka-sse-sa
+    namespace: default
+roleRef:
+  kind: Role
+  name: kafka-sse-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# 4. (示例) 在 Deployment 中使用该 ServiceAccount
+# apiVersion: apps/v1
+# kind: Deployment
+# metadata:
+#   name: kafka-sse-server
+# spec:
+#   template:
+#     spec:
+#       serviceAccountName: kafka-sse-sa
+#       containers:
+#       - name: server
+#         image: your-image:v1

@@ -1,0 +1,12 @@
+server:
+  port: 8080
+  error:
+    include-message: always
+
+spring:
+  kafka:
+    bootstrap-servers: ${KAFKA_BROKERS:localhost:9092}
+
+logging:
+  level:
+    com.example: INFO

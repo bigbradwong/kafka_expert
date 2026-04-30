@@ -1,0 +1,112 @@
+package com.example.sdk;
+
+import redis.clients.jedis.Jedis;
+import software.amazon.awssdk.core.ResponseBytes;
+import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.GetObjectRequest;
+import software.amazon.awssdk.services.s3.model.GetObjectResponse;
+import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+
+import javax.sql.DataSource;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+
+/**
+ * 分布式位移存储接口
+ */
+public interface OffsetStore {
+    void save(String topic, int partition, long offset);
+    long load(String topic, int partition, long defaultOffset);
+}
+
+/**
+ * JDBC 实现 (适用于关系型数据库)
+ */
+class JdbcOffsetStore implements OffsetStore {
+    private final DataSource dataSource;
+    private final String tableName = "kafka_sse_offsets";
+
+    public JdbcOffsetStore(DataSource dataSource) {
+        this.dataSource = dataSource;
+    }
+
+    @Override
+    public void save(String topic, int partition, long offset) {
+        String sql = "INSERT INTO " + tableName + " (topic, part, off) VALUES (?, ?, ?) " +
+                     "ON DUPLICATE KEY UPDATE off = ?";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, topic);
+            ps.setInt(2, partition);
+            ps.setLong(3, offset);
+            ps.setLong(4, offset);
+            ps.executeUpdate();
+        } catch (Exception e) { e.printStackTrace(); }
+    }
+
+    @Override
+    public long load(String topic, int partition, long defaultOffset) {
+        String sql = "SELECT off FROM " + tableName + " WHERE topic = ? AND part = ?";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, topic);
+            ps.setInt(2, partition);
+            ResultSet rs = ps.executeQuery();
+            if (rs.next()) return rs.getLong("off");
+        } catch (Exception e) { e.printStackTrace(); }
+        return defaultOffset;
+    }
+}
+
+/**
+ * Redis 实现 (适用于高性能实时场景)
+ */
+class RedisOffsetStore implements OffsetStore {
+    private final Jedis jedis;
+    private final String prefix = "kafka:sse:offset:";
+
+    public RedisOffsetStore(Jedis jedis) { this.jedis = jedis; }
+
+    @Override
+    public void save(String topic, int partition, long offset) {
+        jedis.set(prefix + topic + ":" + partition, String.valueOf(offset));
+    }
+
+    @Override
+    public long load(String topic, int partition, long defaultOffset) {
+        String val = jedis.get(prefix + topic + ":" + partition);
+        return val != null ? Long.parseLong(val) : defaultOffset;
+    }
+}
+
+/**
+ * S3 实现 (适用于海量位移持久化)
+ */
+class S3OffsetStore implements OffsetStore {
+    private final S3Client s3;
+    private final String bucket;
+
+    public S3OffsetStore(S3Client s3, String bucket) {
+        this.s3 = s3;
+        this.bucket = bucket;
+    }
+
+    @Override
+    public void save(String topic, int partition, long offset) {
+        String key = "offsets/" + topic + "/" + partition + ".txt";
+        s3.putObject(PutObjectRequest.builder().bucket(bucket).key(key).build(),
+                RequestBody.fromString(String.valueOf(offset)));
+    }
+
+    @Override
+    public long load(String topic, int partition, long defaultOffset) {
+        String key = "offsets/" + topic + "/" + partition + ".txt";
+        try {
+            ResponseBytes<GetObjectResponse> objectBytes = s3.getObjectAsBytes(
+                    GetObjectRequest.builder().bucket(bucket).key(key).build());
+            return Long.parseLong(objectBytes.asUtf8String());
+        } catch (Exception e) { return defaultOffset; }
+    }
+}

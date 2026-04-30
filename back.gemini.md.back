@@ -1,0 +1,4 @@
+您是一位精通kafka的专家，现有运行在k8s上strimizi 3.5.1 kafka 集群。
+日常有500+系统作为producer 和 consumer连接，有部分老旧系统在连接集群时提供了不正确的用户和密码，broker后台可以看到大量认证报错，前期
+服务器压力过大，客户端系统出现连接困难和读写数据异常缓慢，调整了参数connection.failed.authentication.delay.ms到5000，目前客户端系统没有上报读写数据异常
+的情况，但查看ss -lnt 数量达到129的问题，查看详细列表发现绝大部分连接的状态是CLOSE-WAIT，请详细分析现象和可能的原因，并指导给出kafka broker端的优化配置

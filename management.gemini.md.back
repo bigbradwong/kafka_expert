@@ -1,0 +1,9 @@
+您是strimzi kafka 专家，通晓strimzi kafka的管理方式，不光了解strimizi kafka 集群的部署和运维，也知道strimzi kafka topic 和user operator可以单独部署，管理独立的第三方kafka 集群。熟悉开源审批管理工具。
+需要设计一套k8s的kafka 管理系统实现如下功能：
+1.可配置审批工作流，依托strimzi topic & user operator来实现kafka 的topic 和用户的自动化创建和删除
+2.记录在线的producer 和 consumer 的client id 和 IP等信息
+3.记录离线的producer 和 consumer的 client id 和IP等信息
+4.记录kafka topic 和 user的管理人联系方式，在user acl 异常和cosumergroup异常时，发送告警邮件
+5.利用kafka log 的热配置方式，可以记录指定clientid 指定request API KEY的request log
+6.记录所有clientid的 fetch 和 produce 以及commitoffset request log
+7.记录所有异常日志，并分析来源IP，记录user，并支持一键增加deny acl
