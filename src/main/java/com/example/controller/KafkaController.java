@@ -33,6 +33,7 @@ public class KafkaController {
             @RequestParam String topic,
             @RequestParam int partition,
             @RequestParam long offset,
+            @RequestParam(defaultValue = "TASK") String mode, // TASK 或 LISTENING
             HttpServletRequest request) {
         
         TopicPartition tp = new TopicPartition(topic, partition);
@@ -55,8 +56,8 @@ public class KafkaController {
         executor.execute(() -> {
             try {
                 var consumer = kafkaService.createAndVerify(topic, partition, offset);
-                // 传入 clientIp 和 registry，以便 poll 循环内部执行心跳续约
-                kafkaService.pollAndStream(consumer, emitter, tp, clientIp, k8sRegistry);
+                // 透传 mode 参数到 service
+                kafkaService.pollAndStream(consumer, emitter, tp, clientIp, k8sRegistry, mode);
             } catch (Exception e) {
                 emitter.completeWithError(e);
             }

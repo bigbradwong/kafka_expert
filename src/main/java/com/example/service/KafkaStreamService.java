@@ -13,7 +13,6 @@ import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
-import java.util.function.Consumer;
 
 @Slf4j
 @Service
@@ -45,27 +44,39 @@ public class KafkaStreamService {
         return consumer;
     }
 
+    /**
+     * @param mode "TASK" 或 "LISTENING"
+     */
     public void pollAndStream(KafkaConsumer<String, String> consumer, SseEmitter emitter, 
-                              TopicPartition tp, String clientIp, K8sPartitionRegistry registry) {
+                              TopicPartition tp, String clientIp, K8sPartitionRegistry registry, String mode) {
         try (consumer) {
             int emptyPolls = 0;
             long lastHeartbeat = 0;
+            boolean isListening = "LISTENING".equalsIgnoreCase(mode);
 
-            while (emptyPolls < 3) {
-                // 每隔 60 秒执行一次 K8s 锁续约心跳
+            // 只要不是监听模式且空拉取达到3次，或者连接断开，就继续
+            while (true) {
+                // 1. 心跳与续约逻辑
                 if (Instant.now().getEpochSecond() - lastHeartbeat > 60) {
                     registry.heartbeat(tp, clientIp);
                     lastHeartbeat = Instant.now().getEpochSecond();
-                    log.debug("Heartbeat sent for partition {}", tp.partition());
+                    emitter.send(SseEmitter.event().comment("heartbeat"));
                 }
 
+                // 2. 拉取消息
                 ConsumerRecords<String, String> records = consumer.poll(Duration.ofSeconds(2));
+                
                 if (records.isEmpty()) {
                     emptyPolls++;
-                    emitter.send(SseEmitter.event().comment("hb-" + emptyPolls));
+                    // TASK 模式下的退出机制
+                    if (!isListening && emptyPolls >= 3) {
+                        log.info("Task mode: No more data for P{}. Completing.", tp.partition());
+                        break;
+                    }
                     continue;
                 }
 
+                // 3. 处理消息
                 emptyPolls = 0;
                 for (ConsumerRecord<String, String> record : records) {
                     String json = String.format("{\"partition\":%d,\"offset\":%d,\"value\":\"%s\"}", 
@@ -73,9 +84,13 @@ public class KafkaStreamService {
                     emitter.send(SseEmitter.event().id(String.valueOf(record.offset())).name("kafka-msg").data(json));
                 }
             }
+            
+            // 只有退出循环（即 TASK 模式完成）才发 complete
             emitter.send(SseEmitter.event().name("complete").data("finished"));
             emitter.complete();
+            
         } catch (Exception e) {
+            log.error("Stream interrupted for P{}", tp.partition(), e);
             emitter.completeWithError(e);
         }
     }
