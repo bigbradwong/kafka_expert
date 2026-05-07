@@ -70,6 +70,13 @@
             <version>${aws.sdk.version}</version>
         </dependency>
 
+        <!-- H2 Database (用于本地磁盘存储) -->
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
         <!-- Kubernetes 协调器依赖 -->
         <dependency>
             <groupId>io.fabric8</groupId>
