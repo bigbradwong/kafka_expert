@@ -7,56 +7,39 @@ import java.time.Instant;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 分区注册表（本地内存实现）
- * 逻辑与 K8sPartitionRegistry 保持一致，支持过期判定和心跳续约
+ * 分区注册表（本地内存版）
+ * 改用 clientId 作为唯一标识，解决多 Pod 同 IP 导致的锁失效问题
  */
 @Component
 public class PartitionRegistry {
 
-    // 存储格式: key -> "clientIp|timestamp"
     private final ConcurrentHashMap<String, String> registry = new ConcurrentHashMap<>();
 
-    /**
-     * 尝试锁定分区
-     * @return null 表示锁定成功；非 null 表示返回当前占用者信息
-     */
-    public synchronized String tryAssign(TopicPartition tp, String clientIp) {
+    public synchronized String tryAssign(TopicPartition tp, String clientId) {
         String key = formatKey(tp);
         if (registry.containsKey(key)) {
-            String val = registry.get(key);
+            String val = registry.get(key); // 格式: "clientId|timestamp"
             if (!isStale(val)) {
-                return val; // 锁仍有效，返回占用者
+                String existingClientId = val.split("\\|")[0];
+                // 如果是同一个 clientId 重连，允许通过
+                if (existingClientId.equals(clientId)) return null;
+                return existingClientId; // 返回当前的占用者 ID
             }
         }
-        
-        // 抢占或续期
-        updateEntry(key, clientIp);
+        updateEntry(key, clientId);
         return null;
     }
 
-    /**
-     * 心跳续约
-     */
-    public void heartbeat(TopicPartition tp, String clientIp) {
-        updateEntry(formatKey(tp), clientIp);
+    public void heartbeat(TopicPartition tp, String clientId) {
+        updateEntry(formatKey(tp), clientId);
     }
 
-    /**
-     * 释放锁
-     */
     public void release(TopicPartition tp) {
         registry.remove(formatKey(tp));
     }
 
-    /**
-     * 更新位移（保留接口兼容性）
-     */
-    public void updateOffset(TopicPartition tp, long offset) {
-        // 逻辑合并至 heartbeat，通过刷新时间戳维系锁
-    }
-
-    private void updateEntry(String key, String clientIp) {
-        registry.put(key, clientIp + "|" + Instant.now().getEpochSecond());
+    private void updateEntry(String key, String clientId) {
+        registry.put(key, clientId + "|" + Instant.now().getEpochSecond());
     }
 
     private String formatKey(TopicPartition tp) {
@@ -66,10 +49,7 @@ public class PartitionRegistry {
     private boolean isStale(String val) {
         try {
             long ts = Long.parseLong(val.split("\\|")[1]);
-            // 5分钟失效阈值
             return (Instant.now().getEpochSecond() - ts) > 300;
-        } catch (Exception e) {
-            return true;
-        }
+        } catch (Exception e) { return true; }
     }
 }

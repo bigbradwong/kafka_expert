@@ -18,27 +18,28 @@ public class K8sPartitionRegistry {
     private final String CM_NAME = "kafka-sse-partition-lock";
     private final String NAMESPACE = "default";
 
-    public synchronized String tryAssign(TopicPartition tp, String clientIp) {
+    public synchronized String tryAssign(TopicPartition tp, String clientId) {
         String key = formatKey(tp);
         ConfigMap cm = getOrCreateConfigMap();
         Map<String, String> data = cm.getData() == null ? new HashMap<>() : cm.getData();
 
         if (data.containsKey(key)) {
-            String val = data.get(key);
-            if (!isStale(val)) return val; 
+            String val = data.get(key); // "clientId|timestamp"
+            if (!isStale(val)) {
+                String existingClientId = val.split("\\|")[0];
+                if (existingClientId.equals(clientId)) return null;
+                return existingClientId; 
+            }
         }
 
-        updateEntry(data, key, clientIp);
+        updateEntry(data, key, clientId);
         return null; 
     }
 
-    /**
-     * 心跳续约：更新时间戳，防止锁过期
-     */
-    public void heartbeat(TopicPartition tp, String clientIp) {
+    public void heartbeat(TopicPartition tp, String clientId) {
         ConfigMap cm = getOrCreateConfigMap();
         Map<String, String> data = cm.getData() == null ? new HashMap<>() : cm.getData();
-        updateEntry(data, formatKey(tp), clientIp);
+        updateEntry(data, formatKey(tp), clientId);
     }
 
     public void release(TopicPartition tp) {
@@ -51,8 +52,8 @@ public class K8sPartitionRegistry {
         }
     }
 
-    private void updateEntry(Map<String, String> data, String key, String clientIp) {
-        data.put(key, clientIp + "|" + Instant.now().getEpochSecond());
+    private void updateEntry(Map<String, String> data, String key, String clientId) {
+        data.put(key, clientId + "|" + Instant.now().getEpochSecond());
         updateConfigMap(data);
     }
 
@@ -68,7 +69,6 @@ public class K8sPartitionRegistry {
     private boolean isStale(String val) {
         try {
             long ts = Long.parseLong(val.split("\\|")[1]);
-            // 5分钟失效阈值
             return (Instant.now().getEpochSecond() - ts) > 300;
         } catch (Exception e) { return true; }
     }

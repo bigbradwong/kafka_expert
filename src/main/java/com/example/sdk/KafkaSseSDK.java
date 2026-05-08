@@ -28,10 +28,13 @@ public class KafkaSseSDK {
     public void startAuto() {
         scheduler.execute(() -> {
             try {
-                Request req = new Request.Builder()
-                        .url(config.getServerUrl() + "/metadata?topic=" + config.getTopic())
+                // 元数据请求也带上 clientId 以便审计或限流
+                HttpUrl url = HttpUrl.parse(config.getServerUrl() + "/metadata").newBuilder()
+                        .addQueryParameter("topic", config.getTopic())
+                        .addQueryParameter("clientId", config.getClientId())
                         .build();
-                
+
+                Request req = new Request.Builder().url(url).build();
                 try (Response resp = client.newCall(req).execute()) {
                     if (resp.isSuccessful() && resp.body() != null) {
                         JSONObject json = new JSONObject(resp.body().string());
@@ -40,7 +43,7 @@ public class KafkaSseSDK {
                             startConsume(i, 0L);
                         }
                     } else {
-                        throw new IOException("Failed to fetch metadata");
+                        throw new IOException("Metadata fail: " + resp.code());
                     }
                 }
             } catch (Exception e) {
@@ -59,12 +62,13 @@ public class KafkaSseSDK {
             currentOffset = config.getOffsetStore().load(config.getTopic(), partition, defaultOffset);
         }
 
-        // 构造 URL，增加 mode 参数
+        // 关键修改：增加 clientId 参数
         HttpUrl httpUrl = HttpUrl.parse(config.getServerUrl() + "/stream").newBuilder()
                 .addQueryParameter("topic", config.getTopic())
                 .addQueryParameter("partition", String.valueOf(partition))
                 .addQueryParameter("offset", String.valueOf(currentOffset))
-                .addQueryParameter("mode", config.getMode().name()) // 透传模式
+                .addQueryParameter("mode", config.getMode().name())
+                .addQueryParameter("clientId", config.getClientId()) 
                 .build();
 
         Request request = new Request.Builder()
@@ -82,11 +86,12 @@ public class KafkaSseSDK {
                 if (isFinished.get()) return;
 
                 if ("sleep".equals(type)) {
+                    // data 现在返回的是占用该分区的 clientId
+                    System.err.println("P" + partition + " locked by " + data + ". Sleeping...");
                     s.cancel();
                     isFinished.set(true);
                     scheduler.schedule(() -> runConsumeLoop(partition, lastSeenOffset), config.getSleepIntervalMin(), TimeUnit.MINUTES);
                 } else if ("complete".equals(type)) {
-                    System.out.println("P" + partition + " finished.");
                     s.cancel();
                     isFinished.set(true);
                 } else if ("kafka-msg".equals(type)) {
