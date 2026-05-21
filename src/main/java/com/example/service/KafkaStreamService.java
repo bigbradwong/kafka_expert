@@ -26,7 +26,6 @@ public class KafkaStreamService {
 
     public int getPartitionCount(String topic) {
         Properties props = createBaseProps();
-        // 查询元数据时也带上前缀，方便在 Kafka 端审计
         props.put(ConsumerConfig.GROUP_ID_CONFIG, groupPrefix + "-metadata-" + System.currentTimeMillis());
         try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props)) {
             List<PartitionInfo> infos = consumer.partitionsFor(topic);
@@ -37,7 +36,6 @@ public class KafkaStreamService {
 
     public KafkaConsumer<String, String> createAndVerify(String topic, int partition, long offset) {
         Properties props = createBaseProps();
-        // 使用配置的前缀构造 group.id: "prefix-topic-partition"
         props.put(ConsumerConfig.GROUP_ID_CONFIG, groupPrefix + "-" + topic + "-" + partition);
         
         KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props);
@@ -99,6 +97,25 @@ public class KafkaStreamService {
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+
+        // --- 跨国/长距离网络高性能调优参数 ---
+        
+        // 1. 批量配置：单次 poll 返回的最大条数。
+        // 调大至 2000 条，配合 1MB 的抓取阈值，提升内存到网络的分发效率。
+        props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 2000); 
+        
+        // 2. 最小拉取量：1MB。
+        props.put(ConsumerConfig.FETCH_MIN_BYTES_CONFIG, 1048576); 
+        
+        // 3. 抓取等待：1000ms。
+        props.put(ConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG, 1000);
+        
+        // 4. 单分区最大拉取量：5MB。
+        props.put(ConsumerConfig.MAX_PARTITION_FETCH_BYTES_CONFIG, 5242880);
+        
+        // 5. 请求超时：30秒。
+        props.put(ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG, 30000);
+
         return props;
     }
 }
