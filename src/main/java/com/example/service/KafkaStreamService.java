@@ -21,9 +21,13 @@ public class KafkaStreamService {
     @Value("${spring.kafka.bootstrap-servers}")
     private String bootstrapServers;
 
+    @Value("${spring.kafka.consumer-group-prefix}")
+    private String groupPrefix;
+
     public int getPartitionCount(String topic) {
         Properties props = createBaseProps();
-        props.put(ConsumerConfig.GROUP_ID_CONFIG, "metadata-fetcher-" + System.currentTimeMillis());
+        // 查询元数据时也带上前缀，方便在 Kafka 端审计
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, groupPrefix + "-metadata-" + System.currentTimeMillis());
         try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props)) {
             List<PartitionInfo> infos = consumer.partitionsFor(topic);
             if (infos == null) throw new RuntimeException("Topic not found: " + topic);
@@ -33,7 +37,8 @@ public class KafkaStreamService {
 
     public KafkaConsumer<String, String> createAndVerify(String topic, int partition, long offset) {
         Properties props = createBaseProps();
-        props.put(ConsumerConfig.GROUP_ID_CONFIG, "sse-group-" + topic + "-" + partition);
+        // 使用配置的前缀构造 group.id: "prefix-topic-partition"
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, groupPrefix + "-" + topic + "-" + partition);
         
         KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props);
         TopicPartition tp = new TopicPartition(topic, partition);
@@ -44,39 +49,30 @@ public class KafkaStreamService {
         return consumer;
     }
 
-    /**
-     * @param mode "TASK" 或 "LISTENING"
-     */
     public void pollAndStream(KafkaConsumer<String, String> consumer, SseEmitter emitter, 
-                              TopicPartition tp, String clientIp, K8sPartitionRegistry registry, String mode) {
+                              TopicPartition tp, String clientId, K8sPartitionRegistry registry, String mode) {
         try (consumer) {
             int emptyPolls = 0;
             long lastHeartbeat = 0;
             boolean isListening = "LISTENING".equalsIgnoreCase(mode);
 
-            // 只要不是监听模式且空拉取达到3次，或者连接断开，就继续
             while (true) {
-                // 1. 心跳与续约逻辑
                 if (Instant.now().getEpochSecond() - lastHeartbeat > 60) {
-                    registry.heartbeat(tp, clientIp);
+                    registry.heartbeat(tp, clientId);
                     lastHeartbeat = Instant.now().getEpochSecond();
                     emitter.send(SseEmitter.event().comment("heartbeat"));
                 }
 
-                // 2. 拉取消息
                 ConsumerRecords<String, String> records = consumer.poll(Duration.ofSeconds(2));
                 
                 if (records.isEmpty()) {
                     emptyPolls++;
-                    // TASK 模式下的退出机制
                     if (!isListening && emptyPolls >= 3) {
-                        log.info("Task mode: No more data for P{}. Completing.", tp.partition());
-                        break;
+                        break; 
                     }
                     continue;
                 }
 
-                // 3. 处理消息
                 emptyPolls = 0;
                 for (ConsumerRecord<String, String> record : records) {
                     String json = String.format("{\"partition\":%d,\"offset\":%d,\"value\":\"%s\"}", 
@@ -85,12 +81,13 @@ public class KafkaStreamService {
                 }
             }
             
-            // 只有退出循环（即 TASK 模式完成）才发 complete
+            if (!isListening) {
+                registry.release(tp);
+            }
             emitter.send(SseEmitter.event().name("complete").data("finished"));
             emitter.complete();
             
         } catch (Exception e) {
-            log.error("Stream interrupted for P{}", tp.partition(), e);
             emitter.completeWithError(e);
         }
     }

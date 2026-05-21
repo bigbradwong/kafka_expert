@@ -1,29 +1,32 @@
 package com.example.service;
 
 import org.apache.kafka.common.TopicPartition;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 分区注册表（本地内存版）
- * 改用 clientId 作为唯一标识，解决多 Pod 同 IP 导致的锁失效问题
+ * 分区注册表（本地内存实现）
+ * 支持 consumer-group-prefix
  */
 @Component
 public class PartitionRegistry {
 
     private final ConcurrentHashMap<String, String> registry = new ConcurrentHashMap<>();
 
+    @Value("${spring.kafka.consumer-group-prefix}")
+    private String groupPrefix;
+
     public synchronized String tryAssign(TopicPartition tp, String clientId) {
         String key = formatKey(tp);
         if (registry.containsKey(key)) {
-            String val = registry.get(key); // 格式: "clientId|timestamp"
+            String val = registry.get(key);
             if (!isStale(val)) {
                 String existingClientId = val.split("\\|")[0];
-                // 如果是同一个 clientId 重连，允许通过
                 if (existingClientId.equals(clientId)) return null;
-                return existingClientId; // 返回当前的占用者 ID
+                return existingClientId;
             }
         }
         updateEntry(key, clientId);
@@ -43,7 +46,8 @@ public class PartitionRegistry {
     }
 
     private String formatKey(TopicPartition tp) {
-        return tp.topic() + "-" + tp.partition();
+        // 与 K8s 注册表保持一致的 Key 格式
+        return groupPrefix + "-" + tp.topic() + "-" + tp.partition();
     }
 
     private boolean isStale(String val) {
