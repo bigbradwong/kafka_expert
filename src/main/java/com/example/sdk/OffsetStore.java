@@ -18,7 +18,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 
 /**
- * 分布式/本地位移存储接口
+ * 分布式/本地位移存储接口 (JDK 1.8 兼容)
  */
 public interface OffsetStore {
     void save(String topic, int partition, long offset);
@@ -26,15 +26,16 @@ public interface OffsetStore {
 }
 
 /**
- * 本地文件实现 (JDK 1.8 兼容)
- * 适用于 TASK 模式单节点运行，极简部署
+ * 本地文件实现 (JDK 1.8)
  */
 class LocalFileOffsetStore implements OffsetStore {
     private final File directory;
 
     public LocalFileOffsetStore(String path) {
         this.directory = new File(path);
-        if (!directory.exists()) directory.mkdirs();
+        if (!directory.exists()) {
+            directory.mkdirs();
+        }
     }
 
     @Override
@@ -63,7 +64,7 @@ class LocalFileOffsetStore implements OffsetStore {
 }
 
 /**
- * JDBC 实现 (适用于关系型数据库)
+ * JDBC 实现 (JDK 1.8)
  */
 class JdbcOffsetStore implements OffsetStore {
     private final DataSource dataSource;
@@ -84,7 +85,9 @@ class JdbcOffsetStore implements OffsetStore {
             ps.setLong(3, offset);
             ps.setLong(4, offset);
             ps.executeUpdate();
-        } catch (Exception e) { e.printStackTrace(); }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 
     @Override
@@ -94,21 +97,26 @@ class JdbcOffsetStore implements OffsetStore {
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, topic);
             ps.setInt(2, partition);
-            ResultSet rs = ps.executeQuery();
-            if (rs.next()) return rs.getLong("off");
-        } catch (Exception e) { e.printStackTrace(); }
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return rs.getLong("off");
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
         return defaultOffset;
     }
 }
 
 /**
- * Redis 实现 (适用于高性能实时场景)
+ * Redis 实现 (JDK 1.8)
  */
 class RedisOffsetStore implements OffsetStore {
     private final Jedis jedis;
     private final String prefix = "kafka:sse:offset:";
 
-    public RedisOffsetStore(Jedis jedis) { this.jedis = jedis; }
+    public RedisOffsetStore(Jedis jedis) {
+        this.jedis = jedis;
+    }
 
     @Override
     public void save(String topic, int partition, long offset) {
@@ -123,7 +131,7 @@ class RedisOffsetStore implements OffsetStore {
 }
 
 /**
- * S3 实现 (适用于海量位移持久化)
+ * S3 实现 (JDK 1.8)
  */
 class S3OffsetStore implements OffsetStore {
     private final S3Client s3;
@@ -147,7 +155,9 @@ class S3OffsetStore implements OffsetStore {
         try {
             ResponseBytes<GetObjectResponse> objectBytes = s3.getObjectAsBytes(
                     GetObjectRequest.builder().bucket(bucket).key(key).build());
-            return Long.parseLong(objectBytes.asUtf8String());
-        } catch (Exception e) { return defaultOffset; }
+            return Long.parseLong(new String(objectBytes.asByteArray(), StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            return defaultOffset;
+        }
     }
 }

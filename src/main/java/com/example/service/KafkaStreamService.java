@@ -37,11 +37,9 @@ public class KafkaStreamService {
     public KafkaConsumer<String, String> createAndVerify(String topic, int partition, long offset) {
         Properties props = createBaseProps();
         props.put(ConsumerConfig.GROUP_ID_CONFIG, groupPrefix + "-" + topic + "-" + partition);
-        
         KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props);
         TopicPartition tp = new TopicPartition(topic, partition);
         consumer.assign(Collections.singletonList(tp));
-        
         long earliest = consumer.beginningOffsets(Collections.singletonList(tp)).get(tp);
         consumer.seek(tp, Math.max(offset, earliest));
         return consumer;
@@ -49,25 +47,28 @@ public class KafkaStreamService {
 
     public void pollAndStream(KafkaConsumer<String, String> consumer, SseEmitter emitter, 
                               TopicPartition tp, String clientId, K8sPartitionRegistry registry, String mode) {
+        boolean isListening = "LISTENING".equalsIgnoreCase(mode);
         try (consumer) {
             int emptyPolls = 0;
             long lastHeartbeat = 0;
-            boolean isListening = "LISTENING".equalsIgnoreCase(mode);
 
             while (true) {
-                if (Instant.now().getEpochSecond() - lastHeartbeat > 60) {
-                    registry.heartbeat(tp, clientId);
-                    lastHeartbeat = Instant.now().getEpochSecond();
-                    emitter.send(SseEmitter.event().comment("heartbeat"));
+                // 1. 心跳续约（隔离异常）
+                try {
+                    if (Instant.now().getEpochSecond() - lastHeartbeat > 60) {
+                        registry.heartbeat(tp, clientId);
+                        lastHeartbeat = Instant.now().getEpochSecond();
+                        emitter.send(SseEmitter.event().comment("heartbeat"));
+                    }
+                } catch (Exception e) {
+                    log.warn("Heartbeat failed for P{}, but continuing: {}", tp.partition(), e.getMessage());
                 }
 
+                // 2. 拉取消息
                 ConsumerRecords<String, String> records = consumer.poll(Duration.ofSeconds(2));
-                
                 if (records.isEmpty()) {
                     emptyPolls++;
-                    if (!isListening && emptyPolls >= 3) {
-                        break; 
-                    }
+                    if (!isListening && emptyPolls >= 3) break; 
                     continue;
                 }
 
@@ -79,13 +80,21 @@ public class KafkaStreamService {
                 }
             }
             
+            // 3. 正常退出：尝试释放锁
             if (!isListening) {
-                registry.release(tp);
+                try {
+                    registry.release(tp);
+                } catch (Exception e) {
+                    log.error("Final release failed for P{}, but completing stream: {}", tp.partition(), e.getMessage());
+                }
             }
+
+            // --- 关键点：无论锁操作如何，只要数据拉完了，必须发送 complete ---
             emitter.send(SseEmitter.event().name("complete").data("finished"));
             emitter.complete();
             
         } catch (Exception e) {
+            log.error("Fatal poll error for P{}", tp.partition(), e);
             emitter.completeWithError(e);
         }
     }
@@ -97,25 +106,11 @@ public class KafkaStreamService {
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
-
-        // --- 跨国/长距离网络高性能调优参数 ---
-        
-        // 1. 批量配置：单次 poll 返回的最大条数。
-        // 调大至 2000 条，配合 1MB 的抓取阈值，提升内存到网络的分发效率。
         props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 2000); 
-        
-        // 2. 最小拉取量：1MB。
         props.put(ConsumerConfig.FETCH_MIN_BYTES_CONFIG, 1048576); 
-        
-        // 3. 抓取等待：1000ms。
         props.put(ConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG, 1000);
-        
-        // 4. 单分区最大拉取量：5MB。
         props.put(ConsumerConfig.MAX_PARTITION_FETCH_BYTES_CONFIG, 5242880);
-        
-        // 5. 请求超时：30秒。
         props.put(ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG, 30000);
-
         return props;
     }
 }

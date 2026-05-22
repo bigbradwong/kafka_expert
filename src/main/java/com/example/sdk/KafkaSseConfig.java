@@ -21,6 +21,18 @@ public class KafkaSseConfig {
     @Builder.Default private int retryIntervalSec = 10;
     @Builder.Default private int sleepIntervalMin = 5;
     
+    /** 
+     * 不活动超时时间（秒）。如果超过此时间没有收到任何消息或心跳，SDK 将主动重连。
+     * 建议设为比服务端心跳间隔稍长（如 120 秒）。
+     */
+    @Builder.Default private int inactivityTimeoutSec = 120;
+
+    /**
+     * 单分区最大重试次数。仅在 TASK 模式下生效。
+     * 超过此次数后，该分区将被标记为 FAILED 并视为“已完成”，不再阻塞全局任务。
+     */
+    @Builder.Default private int maxPartitionRetries = 10;
+
     // 位移存储
     @Builder.Default private boolean enableExternalStore = false;
     private OffsetStore offsetStore;
@@ -29,8 +41,8 @@ public class KafkaSseConfig {
 
     // OAuth2 认证配置
     @Builder.Default private boolean enableOAuth2 = false;
-    private String tokenUrl;      // OAuth2 Token 获取地址
-    private String oauthClientId; // OAuth2 客户端 ID (注意：这不同于上面的实例 ID)
+    private String tokenUrl;
+    private String oauthClientId;
     private String oauthClientSecret;
     private String scope;
 }
