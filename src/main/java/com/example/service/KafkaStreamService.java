@@ -13,6 +13,7 @@ import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -53,18 +54,12 @@ public class KafkaStreamService {
             long lastHeartbeat = 0;
 
             while (true) {
-                // 1. 心跳续约（隔离异常）
-                try {
-                    if (Instant.now().getEpochSecond() - lastHeartbeat > 60) {
-                        registry.heartbeat(tp, clientId);
-                        lastHeartbeat = Instant.now().getEpochSecond();
-                        emitter.send(SseEmitter.event().comment("heartbeat"));
-                    }
-                } catch (Exception e) {
-                    log.warn("Heartbeat failed for P{}, but continuing: {}", tp.partition(), e.getMessage());
+                if (Instant.now().getEpochSecond() - lastHeartbeat > 60) {
+                    registry.heartbeat(tp, clientId);
+                    lastHeartbeat = Instant.now().getEpochSecond();
+                    emitter.send(SseEmitter.event().comment("heartbeat"));
                 }
 
-                // 2. 拉取消息
                 ConsumerRecords<String, String> records = consumer.poll(Duration.ofSeconds(2));
                 if (records.isEmpty()) {
                     emptyPolls++;
@@ -73,28 +68,31 @@ public class KafkaStreamService {
                 }
 
                 emptyPolls = 0;
+                
+                // --- 核心优化：批量打包 ---
+                List<String> batchJson = new ArrayList<>();
+                long lastOffset = -1;
                 for (ConsumerRecord<String, String> record : records) {
-                    String json = String.format("{\"partition\":%d,\"offset\":%d,\"value\":\"%s\"}", 
-                            record.partition(), record.offset(), record.value().replace("\"", "\\\""));
-                    emitter.send(SseEmitter.event().id(String.valueOf(record.offset())).name("kafka-msg").data(json));
+                    batchJson.add(String.format("{\"partition\":%d,\"offset\":%d,\"value\":\"%s\"}", 
+                            record.partition(), record.offset(), record.value().replace("\"", "\\\"")));
+                    lastOffset = record.offset();
                 }
+
+                // 将整个 Poll 批次作为一个 JSON 数组发送
+                String data = "[" + String.join(",", batchJson) + "]";
+                emitter.send(SseEmitter.event()
+                        .id(String.valueOf(lastOffset))
+                        .name("kafka-msg-batch")
+                        .data(data));
             }
             
-            // 3. 正常退出：尝试释放锁
             if (!isListening) {
-                try {
-                    registry.release(tp);
-                } catch (Exception e) {
-                    log.error("Final release failed for P{}, but completing stream: {}", tp.partition(), e.getMessage());
-                }
+                try { registry.release(tp); } catch (Exception e) {}
             }
-
-            // --- 关键点：无论锁操作如何，只要数据拉完了，必须发送 complete ---
             emitter.send(SseEmitter.event().name("complete").data("finished"));
             emitter.complete();
             
         } catch (Exception e) {
-            log.error("Fatal poll error for P{}", tp.partition(), e);
             emitter.completeWithError(e);
         }
     }

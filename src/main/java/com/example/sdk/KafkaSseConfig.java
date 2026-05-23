@@ -2,6 +2,7 @@ package com.example.sdk;
 
 import lombok.Builder;
 import lombok.Data;
+import java.util.List;
 import java.util.UUID;
 import java.util.function.Consumer;
 
@@ -20,32 +21,24 @@ public class KafkaSseConfig {
     // 重试与休眠配置
     @Builder.Default private int retryIntervalSec = 10;
     @Builder.Default private int sleepIntervalMin = 5;
-    
-    /** 
-     * 不活动超时时间（秒）。如果超过此时间没有收到任何消息或心跳，SDK 将主动重连。
-     * 建议设为比服务端心跳间隔稍长（如 120 秒）。
-     */
     @Builder.Default private int inactivityTimeoutSec = 120;
-
-    /**
-     * 单分区最大重试次数。仅在 TASK 模式下生效。
-     * 超过此次数后，该分区将被标记为 FAILED 并视为“已完成”，不再阻塞全局任务。
-     */
     @Builder.Default private int maxPartitionRetries = 10;
+
+    // 批量处理增强
+    /** 是否开启批量消费模式。若开启，将调用 batchMessageHandler。 */
+    @Builder.Default private boolean enableBatchMode = false;
+    /** 批量消息处理器 */
+    private Consumer<List<String>> batchMessageHandler;
+    /** 单条消息处理器 */
+    private Consumer<String> messageHandler;
 
     // 位移存储
     @Builder.Default private boolean enableExternalStore = false;
     private OffsetStore offsetStore;
-    private Consumer<String> messageHandler;
     private Consumer<Throwable> errorHandler;
 
-    /** 
-     * 信任证书路径。
-     * 默认为 "certs/ca.crt"，SDK 会尝试从 JAR 包内置资源中加载。
-     */
+    // SSL 与 认证
     @Builder.Default private String trustedCertResourcePath = "certs/ca.crt";
-
-    // OAuth2 认证配置
     @Builder.Default private boolean enableOAuth2 = false;
     private String tokenUrl;
     private String oauthClientId;

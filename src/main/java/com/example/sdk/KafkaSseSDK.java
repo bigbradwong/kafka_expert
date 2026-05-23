@@ -6,6 +6,7 @@ import okhttp3.sse.EventSourceListener;
 import okhttp3.sse.EventSources;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import javax.net.ssl.*;
@@ -16,6 +17,8 @@ import java.net.UnknownHostException;
 import java.security.KeyStore;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -51,106 +54,71 @@ public class KafkaSseSDK {
         OkHttpClient.Builder builder = new OkHttpClient.Builder()
                 .readTimeout(config.getInactivityTimeoutSec(), TimeUnit.SECONDS)
                 .connectTimeout(10, TimeUnit.SECONDS);
-
-        // 尝试自动加载内置证书
         setupCustomSslIfPresent(builder);
-
         return builder.build();
     }
 
-    /**
-     * 自动探测并配置内置证书
-     */
     private void setupCustomSslIfPresent(OkHttpClient.Builder builder) {
         String path = config.getTrustedCertResourcePath();
         if (path == null || path.isEmpty()) return;
-
         try (InputStream certInput = getClass().getClassLoader().getResourceAsStream(path)) {
-            if (certInput == null) {
-                // 如果是默认路径但没找到，说明用户不需要私有证书，保持沉默使用系统默认 SSL
-                return;
-            }
-
+            if (certInput == null) return;
             CertificateFactory cf = CertificateFactory.getInstance("X.509");
             Certificate cert = cf.generateCertificate(certInput);
-
             KeyStore keyStore = KeyStore.getInstance(KeyStore.getDefaultType());
             keyStore.load(null, null);
             keyStore.setCertificateEntry("ca", cert);
-
             TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
             tmf.init(keyStore);
             TrustManager[] trustManagers = tmf.getTrustManagers();
-
             SSLContext sslContext = SSLContext.getInstance("TLS");
             sslContext.init(null, trustManagers, null);
-
             builder.sslSocketFactory(sslContext.getSocketFactory(), (X509TrustManager) trustManagers[0]);
-            
-            // 为了更好的通用性，默认允许 IP/域名 不匹配（适用于私有证书常见场景）
             builder.hostnameVerifier((hostname, session) -> true);
-            
-            System.out.println(">>> SDK: Auto-loaded trusted certificate from JAR: " + path);
         } catch (Exception e) {
-            System.err.println(">>> SDK Warning: Found certificate but failed to initialize SSL: " + e.getMessage());
+            System.err.println("SSL Init Fail: " + e.getMessage());
         }
     }
 
     private synchronized String getAccessToken() throws IOException {
         if (!config.isEnableOAuth2()) return null;
         if (cachedToken != null && System.currentTimeMillis() < tokenExpiryTime - 60000) return cachedToken;
-
         FormBody.Builder formBuilder = new FormBody.Builder()
                 .add("grant_type", "client_credentials")
                 .add("client_id", config.getOauthClientId())
                 .add("client_secret", config.getOauthClientSecret());
         if (config.getScope() != null) formBuilder.add("scope", config.getScope());
-
         Request request = new Request.Builder().url(config.getTokenUrl()).post(formBuilder.build()).build();
         try (Response resp = client.newCall(request).execute()) {
-            if (!resp.isSuccessful() || resp.body() == null) throw new IOException("OAuth2 fetch failed: " + resp.code());
+            if (!resp.isSuccessful() || resp.body() == null) throw new IOException("OAuth2 fail: " + resp.code());
             JSONObject json = new JSONObject(resp.body().string());
             this.cachedToken = json.getString("access_token");
-            long expiresIn = json.has("expires_in") ? json.getLong("expires_in") : 3600;
-            this.tokenExpiryTime = System.currentTimeMillis() + (expiresIn * 1000);
+            this.tokenExpiryTime = System.currentTimeMillis() + (json.optLong("expires_in", 3600) * 1000);
             return cachedToken;
         }
     }
 
     private Request.Builder createAuthenticatedRequestBuilder(String url) throws IOException {
         Request.Builder builder = new Request.Builder().url(url);
-        if (config.isEnableOAuth2()) {
-            builder.header("Authorization", "Bearer " + getAccessToken());
-        }
+        if (config.isEnableOAuth2()) builder.header("Authorization", "Bearer " + getAccessToken());
         return builder;
     }
 
     public void startAuto() {
         if (isFatalError.get()) return;
-        scheduler.execute(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    HttpUrl url = HttpUrl.parse(config.getServerUrl() + "/metadata").newBuilder()
-                            .addQueryParameter("topic", config.getTopic())
-                            .addQueryParameter("clientId", config.getClientId())
-                            .build();
-
-                    Request req = createAuthenticatedRequestBuilder(url.toString()).build();
-                    try (Response resp = client.newCall(req).execute()) {
-                        if (resp.isSuccessful() && resp.body() != null) {
-                            JSONObject json = new JSONObject(resp.body().string());
-                            totalPartitions = json.getInt("partitionCount");
-                            System.out.println("Auto-discovery: " + totalPartitions + " partitions. Starting...");
-                            for (int i = 0; i < totalPartitions; i++) startConsume(i, 0L);
-                        } else {
-                            handleGlobalFailure(null, resp, "Metadata discovery");
-                        }
-                    }
-                } catch (Exception e) {
-                    handleGlobalFailure(e, null, "Metadata discovery");
+        scheduler.execute(() -> {
+            try {
+                HttpUrl url = HttpUrl.parse(config.getServerUrl() + "/metadata").newBuilder()
+                        .addQueryParameter("topic", config.getTopic()).addQueryParameter("clientId", config.getClientId()).build();
+                Request req = createAuthenticatedRequestBuilder(url.toString()).build();
+                try (Response resp = client.newCall(req).execute()) {
+                    if (resp.isSuccessful() && resp.body() != null) {
+                        JSONObject json = new JSONObject(resp.body().string());
+                        totalPartitions = json.getInt("partitionCount");
+                        for (int i = 0; i < totalPartitions; i++) startConsume(i, 0L);
+                    } else { handleGlobalFailure(null, resp, "Metadata"); }
                 }
-            }
+            } catch (Exception e) { handleGlobalFailure(e, null, "Metadata"); }
         });
     }
 
@@ -161,7 +129,6 @@ public class KafkaSseSDK {
 
     private void runConsumeLoop(int partition, long defaultOffset) {
         if (isFatalError.get() || finishedPartitionIds.contains(partition)) return;
-
         long currentOffset = defaultOffset;
         if (config.isEnableExternalStore() && config.getOffsetStore() != null) {
             currentOffset = config.getOffsetStore().load(config.getTopic(), partition, defaultOffset);
@@ -176,10 +143,7 @@ public class KafkaSseSDK {
                 .build();
 
         try {
-            Request request = createAuthenticatedRequestBuilder(httpUrl.toString())
-                    .header("Accept", "text/event-stream")
-                    .build();
-
+            Request request = createAuthenticatedRequestBuilder(httpUrl.toString()).header("Accept", "text/event-stream").build();
             final long finalOffset = currentOffset;
             EventSources.createFactory(client).newEventSource(request, new EventSourceListener() {
                 private long lastSeenOffset = finalOffset;
@@ -189,14 +153,15 @@ public class KafkaSseSDK {
                 public void onEvent(@NotNull EventSource s, @Nullable String id, @Nullable String type, @NotNull String data) {
                     if (isFinished.get() || isFatalError.get()) return;
                     partitionRetryTracker.remove(partition);
+
                     if ("sleep".equals(type)) {
-                        stopThisStream(s);
+                        stopStream(s);
                         scheduler.schedule(() -> runConsumeLoop(partition, lastSeenOffset), config.getSleepIntervalMin(), TimeUnit.MINUTES);
                     } else if ("complete".equals(type)) {
-                        stopThisStream(s);
+                        stopStream(s);
                         markPartitionFinished(partition, false);
-                    } else if ("kafka-msg".equals(type)) {
-                        config.getMessageHandler().accept(data);
+                    } else if ("kafka-msg-batch".equals(type)) {
+                        processBatch(data);
                         if (id != null) {
                             lastSeenOffset = Long.parseLong(id) + 1;
                             if (config.isEnableExternalStore() && config.getOffsetStore() != null) {
@@ -206,23 +171,31 @@ public class KafkaSseSDK {
                     }
                 }
 
+                private void processBatch(String data) {
+                    JSONArray array = new JSONArray(data);
+                    if (config.isEnableBatchMode()) {
+                        List<String> list = new ArrayList<>();
+                        for (int i = 0; i < array.length(); i++) list.add(array.get(i).toString());
+                        if (config.getBatchMessageHandler() != null) config.getBatchMessageHandler().accept(list);
+                    } else {
+                        if (config.getMessageHandler() != null) {
+                            for (int i = 0; i < array.length(); i++) config.getMessageHandler().accept(array.get(i).toString());
+                        }
+                    }
+                }
+
                 @Override
                 public void onFailure(@NotNull EventSource s, @Nullable Throwable t, @Nullable Response r) {
                     if (isFinished.get() || isFatalError.get()) return;
-                    stopThisStream(s);
+                    stopStream(s);
                     if (r != null && r.code() == 401) cachedToken = null;
                     if (isFatal(t, r)) markFatal(t, r, "P" + partition);
                     else handlePartitionFailure(partition, lastSeenOffset, t, r);
                 }
 
-                private void stopThisStream(EventSource s) {
-                    s.cancel();
-                    isFinished.set(true);
-                }
+                private void stopStream(EventSource s) { s.cancel(); isFinished.set(true); }
             });
-        } catch (IOException e) {
-            handlePartitionFailure(partition, defaultOffset, e, null);
-        }
+        } catch (IOException e) { handlePartitionFailure(partition, defaultOffset, e, null); }
     }
 
     private void handlePartitionFailure(int partition, long offset, Throwable t, Response r) {
@@ -231,9 +204,8 @@ public class KafkaSseSDK {
             return;
         }
         int retries = partitionRetryTracker.getOrDefault(partition, 0) + 1;
-        if (retries > config.getMaxPartitionRetries()) {
-            markPartitionFinished(partition, true);
-        } else {
+        if (retries > config.getMaxPartitionRetries()) markPartitionFinished(partition, true);
+        else {
             partitionRetryTracker.put(partition, retries);
             scheduler.schedule(() -> runConsumeLoop(partition, offset), config.getRetryIntervalSec(), TimeUnit.SECONDS);
         }
@@ -242,37 +214,28 @@ public class KafkaSseSDK {
     private void markPartitionFinished(int partitionId, boolean isError) {
         if (isError) failedPartitionIds.add(partitionId);
         if (finishedPartitionIds.add(partitionId)) {
-            int done = finishedCount.incrementAndGet();
-            if (done >= totalPartitions) {
-                System.out.println(">>> [FINISH] All " + totalPartitions + " partitions processed.");
+            if (finishedCount.incrementAndGet() >= totalPartitions) {
+                System.out.println(">>> [FINISH] Task completed.");
                 shutdown();
-            } else {
-                Set<Integer> remaining = IntStream.range(0, totalPartitions).boxed()
-                        .filter(id -> !finishedPartitionIds.contains(id)).collect(Collectors.toSet());
-                System.out.println("Progress: " + done + "/" + totalPartitions + ". Pending: " + remaining);
             }
         }
     }
 
     private boolean isFatal(Throwable t, Response r) {
-        if (r != null && r.code() >= 400 && r.code() < 500) {
-            return r.code() != 401 && r.code() != 408 && r.code() != 429;
-        }
+        if (r != null && r.code() >= 400 && r.code() < 500) return r.code() != 401 && r.code() != 408 && r.code() != 429;
         return t instanceof UnknownHostException || t instanceof ConnectException;
     }
 
     private void markFatal(Throwable t, Response r, String context) {
         if (isFatalError.compareAndSet(false, true)) {
-            String msg = (r != null) ? "HTTP " + r.code() : (t != null ? t.getMessage() : "Unknown");
-            System.err.println("FATAL [" + context + "]: " + msg + ". SDK stopping.");
-            if (config.getErrorHandler() != null) config.getErrorHandler().accept(t != null ? t : new RuntimeException(msg));
+            if (config.getErrorHandler() != null) config.getErrorHandler().accept(t != null ? t : new RuntimeException("Fatal error"));
             shutdown();
         }
     }
 
     private void handleGlobalFailure(Throwable t, Response r, String context) {
         if (isFatal(t, r)) markFatal(t, r, context);
-        else scheduler.schedule(() -> startAuto(), config.getRetryIntervalSec(), TimeUnit.SECONDS);
+        else scheduler.schedule(this::startAuto, config.getRetryIntervalSec(), TimeUnit.SECONDS);
     }
 
     public void shutdown() {
