@@ -39,6 +39,12 @@ public class KafkaSseConfig {
     private Consumer<String> messageHandler;
     private Consumer<Throwable> errorHandler;
 
+    /** 
+     * 信任证书路径。
+     * 默认为 "certs/ca.crt"，SDK 会尝试从 JAR 包内置资源中加载。
+     */
+    @Builder.Default private String trustedCertResourcePath = "certs/ca.crt";
+
     // OAuth2 认证配置
     @Builder.Default private boolean enableOAuth2 = false;
     private String tokenUrl;
